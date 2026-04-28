@@ -69,6 +69,96 @@ pub fn upLink(self: *Self, index: usize) !void {
     self.seq += 1;
 }
 
+pub fn getInterfaceIndex(self: *Self, name: []const u8) !usize {
+    const Request = extern struct {
+        hdr: linux.nlmsghdr,
+        msg: linux.ifinfomsg,
+    };
+    var req = Request{
+        .hdr = .{
+            .len = @sizeOf(Request),
+            .type = .RTM_GETLINK,
+            .flags = linux.NLM_F_REQUEST | linux.NLM_F_DUMP,
+            .seq = self.seq,
+            .pid = 0,
+        },
+        .msg = .{
+            .family = linux.AF.UNSPEC,
+            .type = 0,
+            .index = 0,
+            .flags = 0,
+            .change = 0,
+        },
+    };
+    const sent = linux.sendto(@intCast(self.fd), std.mem.asBytes(&req), @sizeOf(Request), 0, null, 0);
+    if (linux.errno(sent) != .SUCCESS) return error.SendFailed;
+
+    var buf: [8192]u8 align(4) = undefined;
+    while (true) {
+        const n = linux.recvfrom(@intCast(self.fd), &buf, buf.len, 0, null, null);
+        if (n == 0) return error.NotFound;
+        if (linux.errno(n) != .SUCCESS) return error.RecvFailed;
+
+        var nl_iter = lib.NetlinkIterator(linux.ifinfomsg).init(buf[0..n]);
+        while (nl_iter.next()) |msg| {
+            if (msg.hdr.type == .DONE) return error.NotFound;
+            if (msg.hdr.type == .ERROR) return error.NetlinkError;
+
+            const ifi = msg.msg.?;
+
+            var attrs = msg.attrs;
+            while (attrs.next()) |rta| {
+                if (rta.type.link == .IFNAME) {
+                    const ifname = lib.rtaPayload(rta);
+                    if (std.mem.eql(u8, name, ifname[0 .. ifname.len - 1])) {
+                        return @intCast(ifi.index);
+                    }
+                }
+            }
+        }
+    }
+
+    self.seq += 1;
+
+    return null;
+}
+
+pub fn setupVeth(self: *Self, netns_fd: usize, veth_name: []const u8) !void {
+    const veth_index = try self.getInterfaceIndex(veth_name);
+
+    const Request = extern struct {
+        hdr: linux.nlmsghdr,
+        msg: linux.ifinfomsg,
+        rta: linux.rtattr,
+        fd: i32,
+    };
+    const req = Request{
+        .hdr = .{
+            .type = .RTM_SETLINK,
+            .len = @sizeOf(Request),
+            .seq = self.seq,
+            .flags = linux.NLM_F_REQUEST | linux.NLM_F_ACK,
+            .pid = 0,
+        },
+        .msg = .{
+            .family = linux.AF.UNSPEC,
+            .index = @intCast(veth_index),
+            .flags = 0,
+            .type = 0,
+            .change = 0,
+        },
+        .rta = .{
+            .type = .{ .link = .NET_NS_FD },
+            .len = @sizeOf(linux.rtattr) + @sizeOf(i32),
+        },
+        .fd = @intCast(netns_fd),
+    };
+    const sent = linux.sendto(@intCast(self.fd), std.mem.asBytes(&req), @sizeOf(Request), 0, null, 0);
+    if (linux.errno(sent) != .SUCCESS) return error.NetlinkError;
+
+    self.seq += 1;
+}
+
 pub fn addIpv4Addr(self: *Self, index: u32, addr: [4]u8) !void {
     const AddrRequest = extern struct {
         hdr: linux.nlmsghdr,
