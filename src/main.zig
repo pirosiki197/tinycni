@@ -12,6 +12,8 @@ pub fn main(init: std.process.Init) !void {
     var client = try tinycni.Client.init();
     defer client.deinit();
 
+    try client.createVeth("veth0", "veth1");
+
     try client.upLink(1);
 
     try client.addIpv4Addr(1, [_]u8{ 10, 0, 0, 1 });

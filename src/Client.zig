@@ -3,6 +3,8 @@ const linux = std.os.linux;
 const log = std.log;
 const lib = @import("root.zig");
 
+const Alignment = std.mem.Alignment;
+
 const Self = @This();
 
 fd: usize,
@@ -63,6 +65,8 @@ pub fn upLink(self: *Self, index: usize) !void {
     if (linux.errno(sent) != .SUCCESS) return error.SendFailed;
 
     try self.waitAck();
+
+    self.seq += 1;
 }
 
 pub fn addIpv4Addr(self: *Self, index: u32, addr: [4]u8) !void {
@@ -209,6 +213,89 @@ pub fn printIpAddresses(self: *Self) !void {
     self.seq += 1;
 }
 
+pub fn createVeth(self: *Self, name: []const u8, peer_name: []const u8) !void {
+    const IFLA_INFO_KIND = 1;
+    const IFLA_INFO_DATA = 2;
+    const VETH_INFO_PEER = 1;
+
+    // RTM_NEWLINK
+    // └─ IFLA_IFNAME = "veth0"
+    // └─ IFLA_LINKINFO
+    //     └─ kind = "veth"
+    //     └─ data
+    //         └─ VETH_INFO_PEER
+    //             └─ (peer ifinfomsg + attrs)
+
+    var buf_array: [512]u8 align(4) = undefined;
+    const buf = buf_array[0..];
+    var offset: usize = 0;
+
+    // -- ifname --
+    const ifname = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.IFNAME));
+    writeCString(buf, &offset, name);
+    ifname.end(&offset);
+
+    // -- link info --
+    const linkinfo = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.LINKINFO));
+
+    const kind = Attr.start(buf, &offset, IFLA_INFO_KIND);
+    writeCString(buf, &offset, "veth");
+    kind.end(&offset);
+
+    const data = Attr.start(buf, &offset, IFLA_INFO_DATA);
+
+    const peer = Attr.start(buf, &offset, VETH_INFO_PEER);
+
+    const peer_ifi: *linux.ifinfomsg = @ptrCast(@alignCast(&buf[offset]));
+    peer_ifi.* = .{
+        .family = linux.AF.UNSPEC,
+        .type = 0,
+        .index = 0,
+        .flags = 0,
+        .change = 0,
+    };
+    offset += @sizeOf(linux.ifinfomsg);
+
+    const peer_ifname = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.IFNAME));
+    writeCString(buf, &offset, peer_name);
+    peer_ifname.end(&offset);
+
+    peer.end(&offset);
+    data.end(&offset);
+    linkinfo.end(&offset);
+
+    const total_len = @sizeOf(linux.nlmsghdr) + @sizeOf(linux.ifinfomsg) + offset;
+    const Request = extern struct {
+        hdr: linux.nlmsghdr,
+        msg: linux.ifinfomsg,
+        buf: [512]u8,
+    };
+    const req = Request{
+        .hdr = .{
+            .type = .RTM_NEWLINK,
+            .len = @truncate(total_len),
+            .flags = linux.NLM_F_REQUEST | linux.NLM_F_CREATE | linux.NLM_F_EXCL | linux.NLM_F_ACK,
+            .seq = self.seq,
+            .pid = 0,
+        },
+        .msg = .{
+            .family = linux.AF.UNSPEC,
+            .type = 0,
+            .index = 0,
+            .flags = 0,
+            .change = 0,
+        },
+        .buf = buf_array,
+    };
+
+    const sent = linux.sendto(@intCast(self.fd), std.mem.asBytes(&req), total_len, 0, null, 0);
+    if (linux.errno(sent) != .SUCCESS) return error.SendFailed;
+
+    try self.waitAck();
+
+    self.seq += 1;
+}
+
 fn waitAck(self: Self) !void {
     var buf: [4096]u8 align(4) = undefined;
     while (true) {
@@ -230,4 +317,34 @@ fn waitAck(self: Self) !void {
         }
     }
     self.seq += 1;
+}
+
+const Attr = struct {
+    s: usize,
+    rta: *linux.rtattr,
+
+    fn start(buf: []u8, offset: *usize, rta_type: u16) Attr {
+        const s = offset.*;
+        const rta: *linux.rtattr = @ptrCast(@alignCast(&buf[offset.*]));
+        rta.type = .{ .link = @enumFromInt(rta_type) };
+        rta.len = @sizeOf(linux.rtattr);
+        offset.* += @sizeOf(linux.rtattr);
+
+        return .{
+            .s = s,
+            .rta = rta,
+        };
+    }
+
+    fn end(self: Attr, offset: *usize) void {
+        self.rta.len = @truncate(offset.* - self.s);
+        offset.* = Alignment.@"4".forward(offset.*);
+    }
+};
+
+fn writeCString(buf: []u8, offset: *usize, s: []const u8) void {
+    @memcpy(buf[offset.*..].ptr, s);
+    offset.* += s.len;
+    buf[offset.*] = 0;
+    offset.* += 1;
 }
