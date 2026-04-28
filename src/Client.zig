@@ -93,6 +93,8 @@ pub fn getInterfaceIndex(self: *Self, name: []const u8) !usize {
     const sent = linux.sendto(@intCast(self.fd), std.mem.asBytes(&req), @sizeOf(Request), 0, null, 0);
     if (linux.errno(sent) != .SUCCESS) return error.SendFailed;
 
+    self.seq += 1;
+
     var buf: [8192]u8 align(4) = undefined;
     while (true) {
         const n = linux.recvfrom(@intCast(self.fd), &buf, buf.len, 0, null, null);
@@ -118,14 +120,10 @@ pub fn getInterfaceIndex(self: *Self, name: []const u8) !usize {
         }
     }
 
-    self.seq += 1;
-
-    return null;
+    return error.NotFound;
 }
 
-pub fn setupVeth(self: *Self, netns_fd: usize, veth_name: []const u8) !void {
-    const veth_index = try self.getInterfaceIndex(veth_name);
-
+pub fn setupVeth(self: *Self, netns_fd: usize, veth_index: usize) !void {
     const Request = extern struct {
         hdr: linux.nlmsghdr,
         msg: linux.ifinfomsg,
@@ -154,12 +152,14 @@ pub fn setupVeth(self: *Self, netns_fd: usize, veth_name: []const u8) !void {
         .fd = @intCast(netns_fd),
     };
     const sent = linux.sendto(@intCast(self.fd), std.mem.asBytes(&req), @sizeOf(Request), 0, null, 0);
-    if (linux.errno(sent) != .SUCCESS) return error.NetlinkError;
+    if (linux.errno(sent) != .SUCCESS) return error.SendFiled;
+
+    try self.waitAck();
 
     self.seq += 1;
 }
 
-pub fn addIpv4Addr(self: *Self, index: u32, addr: [4]u8) !void {
+pub fn addIpv4Addr(self: *Self, index: usize, addr: [4]u8) !void {
     const AddrRequest = extern struct {
         hdr: linux.nlmsghdr,
         msg: ifaddrmsg,
@@ -176,10 +176,10 @@ pub fn addIpv4Addr(self: *Self, index: u32, addr: [4]u8) !void {
         },
         .msg = .{
             .family = linux.AF.INET,
-            .prefixlen = 8,
+            .prefixlen = 24,
             .flags = 0,
-            .scope = 254,
-            .index = index,
+            .scope = 0,
+            .index = @truncate(index),
         },
         .rta = .{
             .len = @sizeOf(linux.rtattr) + 4,
@@ -192,6 +192,8 @@ pub fn addIpv4Addr(self: *Self, index: u32, addr: [4]u8) !void {
     if (linux.errno(sent) != .SUCCESS) return error.SendFailed;
 
     try self.waitAck();
+
+    self.seq += 1;
 }
 
 pub fn printLinknames(self: *Self) !void {
