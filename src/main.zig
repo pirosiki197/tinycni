@@ -4,6 +4,8 @@ const log = std.log;
 
 const tinycni = @import("tinycni");
 
+const bridge_name = "tinycnibridge0";
+
 pub fn main(init: std.process.Init) !void {
     _ = init;
 
@@ -13,17 +15,21 @@ pub fn main(init: std.process.Init) !void {
     const netns_fd = linux.open("/var/run/netns/testns", .{}, 0);
     defer _ = linux.close(@intCast(netns_fd));
 
-    _ = host_client.ifnameToIndex("tinycnibridge0") catch {
-        try host_client.createBridge("tinycnibridge0");
+    const bridge_index = host_client.ifnameToIndex(bridge_name) catch blk: {
+        try host_client.createBridge(bridge_name);
+        const bridge_index = try host_client.ifnameToIndex(bridge_name);
+        try host_client.upLink(bridge_index);
+        try host_client.addIpv4Addr(bridge_index, [_]u8{ 10, 0, 0, 1 });
+        break :blk bridge_index;
     };
 
     try host_client.createVeth("veth0", "veth1");
     const veth1_index = try host_client.ifnameToIndex("veth1");
-    try host_client.setupVeth(netns_fd, veth1_index);
+    try host_client.moveLinkToNetns(netns_fd, veth1_index);
 
     const veth0_index = try host_client.ifnameToIndex("veth0");
     try host_client.upLink(veth0_index);
-    try host_client.addIpv4Addr(veth0_index, [_]u8{ 10, 0, 0, 1 });
+    try host_client.attachToBridge(veth0_index, bridge_index);
 
     const n = linux.setns(@intCast(netns_fd), 0);
     if (linux.errno(n) != .SUCCESS) return error.SetnsError;

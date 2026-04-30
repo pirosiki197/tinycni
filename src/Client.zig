@@ -182,7 +182,7 @@ pub fn ifnameToIndex(self: *Self, name: []const u8) !usize {
     return error.NotFound;
 }
 
-pub fn setupVeth(self: *Self, netns_fd: usize, veth_index: usize) !void {
+pub fn moveLinkToNetns(self: *Self, netns_fd: usize, veth_index: usize) !void {
     const Request = extern struct {
         hdr: linux.nlmsghdr,
         msg: linux.ifinfomsg,
@@ -212,6 +212,41 @@ pub fn setupVeth(self: *Self, netns_fd: usize, veth_index: usize) !void {
     };
     const sent = linux.sendto(@intCast(self.fd), std.mem.asBytes(&req), @sizeOf(Request), 0, null, 0);
     if (linux.errno(sent) != .SUCCESS) return error.SendFiled;
+
+    try self.waitAck();
+
+    self.seq += 1;
+}
+
+pub fn attachToBridge(self: *Self, ifindex: usize, bridge_index: usize) !void {
+    const Request = extern struct {
+        hdr: linux.nlmsghdr,
+        msg: linux.ifinfomsg,
+        rta: linux.rtattr,
+        bridge_index: u32,
+    };
+    const req = Request{
+        .hdr = .{
+            .type = .RTM_NEWLINK,
+            .len = @sizeOf(Request),
+            .flags = linux.NLM_F_REQUEST | linux.NLM_F_ACK,
+            .seq = self.seq,
+            .pid = 0,
+        },
+        .msg = .{
+            .family = linux.AF.UNSPEC,
+            .index = @intCast(ifindex),
+            .type = 0,
+            .flags = 0,
+            .change = 0,
+        },
+        .rta = .{
+            .type = .{ .link = .MASTER },
+            .len = @sizeOf(linux.rtattr) + @sizeOf(u32),
+        },
+        .bridge_index = @truncate(bridge_index),
+    };
+    try self.send(std.mem.asBytes(&req)[0..@sizeOf(Request)]);
 
     try self.waitAck();
 
