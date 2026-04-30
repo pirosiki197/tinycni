@@ -14,13 +14,68 @@ const ifaddrmsg = extern struct {
     family: u8,
     prefixlen: u8,
     flags: u8,
-    scope: u8,
+    scope: RT_SCOPE,
     index: u32,
+};
+
+const rtmsg = extern struct {
+    family: u8,
+    dst_len: u8,
+    src_len: u8,
+    tos: u8,
+    table: RT_TABLE,
+    protocol: RTPROT,
+    scope: RT_SCOPE,
+    type: RTN,
+    flags: u32,
 };
 
 const nlmsgerr = extern struct {
     err: i32,
     msg: linux.nlmsghdr,
+};
+
+const RTPROT = enum(u8) {
+    UNSPEC = 0,
+    REDIRECT = 1,
+    KERNEL = 2,
+    BOOT = 3,
+    STATIC = 4,
+    _,
+};
+
+const RT_SCOPE = enum(u8) {
+    UNIVERSE = 0,
+    SITE = 200,
+    LINK = 253,
+    HOST = 254,
+    NOWHERE = 255,
+};
+
+const RT_TABLE = enum(u8) {
+    UNSPEC = 0,
+
+    COMPAT = 252,
+    DEFAULT = 253,
+    MAIN = 254,
+    LOCAL = 255,
+
+    _,
+};
+
+const RTN = enum(u8) {
+    UNSPEC,
+    UNICAST,
+    LOCAL,
+    BROADCAST,
+    ANYCAST,
+    MULTICAST,
+    BLACKHOLE,
+    UNREACHABLE,
+    PROHIBIT,
+    THROW,
+    NAT,
+    XRESOLVE,
 };
 
 pub fn init() !Self {
@@ -69,7 +124,7 @@ pub fn upLink(self: *Self, index: usize) !void {
     self.seq += 1;
 }
 
-pub fn getInterfaceIndex(self: *Self, name: []const u8) !usize {
+pub fn ifnameToIndex(self: *Self, name: []const u8) !usize {
     const Request = extern struct {
         hdr: linux.nlmsghdr,
         msg: linux.ifinfomsg,
@@ -178,7 +233,7 @@ pub fn addIpv4Addr(self: *Self, index: usize, addr: [4]u8) !void {
             .family = linux.AF.INET,
             .prefixlen = 24,
             .flags = 0,
-            .scope = 0,
+            .scope = .UNIVERSE,
             .index = @truncate(index),
         },
         .rta = .{
@@ -381,6 +436,54 @@ pub fn createVeth(self: *Self, name: []const u8, peer_name: []const u8) !void {
     };
 
     const sent = linux.sendto(@intCast(self.fd), std.mem.asBytes(&req), total_len, 0, null, 0);
+    if (linux.errno(sent) != .SUCCESS) return error.SendFailed;
+
+    try self.waitAck();
+
+    self.seq += 1;
+}
+
+pub fn setDefaultGateway(self: *Self, ifindex: usize, gw: [4]u8) !void {
+    const Request = extern struct {
+        hdr: linux.nlmsghdr,
+        msg: rtmsg,
+        gw_rta: linux.rtattr,
+        gw: [4]u8,
+        oif_rta: linux.rtattr,
+        ifindex: u32,
+    };
+    var req = Request{
+        .hdr = .{
+            .len = @sizeOf(Request),
+            .type = .RTM_NEWROUTE,
+            .flags = linux.NLM_F_REQUEST | linux.NLM_F_CREATE | linux.NLM_F_EXCL | linux.NLM_F_ACK,
+            .seq = self.seq,
+            .pid = 0,
+        },
+        .msg = .{
+            .family = linux.AF.INET,
+            .dst_len = 0,
+            .src_len = 0,
+            .tos = 0,
+            .table = .MAIN,
+            .protocol = .STATIC,
+            .scope = .UNIVERSE,
+            .type = .UNICAST,
+            .flags = 0,
+        },
+        .gw_rta = .{
+            .len = @sizeOf(linux.rtattr) + 4,
+            .type = .{ .link = @enumFromInt(5) }, // RTA_GATEWAY
+        },
+        .gw = gw,
+        .oif_rta = .{
+            .len = @sizeOf(linux.rtattr) + @sizeOf(u32),
+            .type = .{ .link = @enumFromInt(4) }, // RTA_OIF
+        },
+        .ifindex = @truncate(ifindex),
+    };
+
+    const sent = linux.sendto(@intCast(self.fd), std.mem.asBytes(&req), @sizeOf(Request), 0, null, 0);
     if (linux.errno(sent) != .SUCCESS) return error.SendFailed;
 
     try self.waitAck();
