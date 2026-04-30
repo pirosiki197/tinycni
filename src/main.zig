@@ -7,7 +7,7 @@ const tinycni = @import("tinycni");
 const bridge_name = "tinycnibridge0";
 
 pub fn main(init: std.process.Init) !void {
-    _ = init;
+    const io = init.io;
 
     var host_client = try tinycni.Client.init();
     defer host_client.deinit();
@@ -20,6 +20,7 @@ pub fn main(init: std.process.Init) !void {
         const bridge_index = try host_client.ifnameToIndex(bridge_name);
         try host_client.upLink(bridge_index);
         try host_client.addIpv4Addr(bridge_index, [_]u8{ 10, 0, 0, 1 });
+        try configureNat(io, "eth0");
         break :blk bridge_index;
     };
 
@@ -47,10 +48,23 @@ pub fn main(init: std.process.Init) !void {
     try netns_client.setDefaultGateway(netns_veth1_index, [_]u8{ 10, 0, 0, 1 });
 }
 
-fn namespace() !void {
-    const unshare_res = linux.unshare(linux.CLONE.NEWNET);
-    if (linux.errno(unshare_res) != .SUCCESS) {
-        log.err("unshare failed: {}", .{linux.errno(unshare_res)});
-        return error.UnshareFailed;
-    }
+const container_cidr = "10.0.0.0/24";
+
+fn configureNat(io: std.Io, out: []const u8) !void {
+    var proc = try std.process.spawn(io, .{
+        .argv = &.{
+            "iptables",
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-s",
+            container_cidr,
+            "-o",
+            out,
+            "-j",
+            "MASQUERADE",
+        },
+    });
+    _ = try proc.wait(io);
 }
