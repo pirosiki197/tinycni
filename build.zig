@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
     const mod = b.addModule("tinycni", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .optimize = optimize,
     });
 
     const exe = b.addExecutable(.{
@@ -15,6 +16,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .single_threaded = true,
             .imports = &.{
                 .{ .name = "tinycni", .module = mod },
             },
