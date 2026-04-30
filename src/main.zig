@@ -13,6 +13,10 @@ pub fn main(init: std.process.Init) !void {
     const netns_fd = linux.open("/var/run/netns/testns", .{}, 0);
     defer _ = linux.close(@intCast(netns_fd));
 
+    _ = host_client.ifnameToIndex("tinycnibridge0") catch {
+        try host_client.createBridge("tinycnibridge0");
+    };
+
     try host_client.createVeth("veth0", "veth1");
     const veth1_index = try host_client.ifnameToIndex("veth1");
     try host_client.setupVeth(netns_fd, veth1_index);
@@ -34,7 +38,6 @@ pub fn main(init: std.process.Init) !void {
 
     try netns_client.addIpv4Addr(netns_veth1_index, [_]u8{ 10, 0, 0, 2 });
 
-    log.info("veth1 index = {d}", .{netns_veth1_index});
     try netns_client.setDefaultGateway(netns_veth1_index, [_]u8{ 10, 0, 0, 1 });
 }
 

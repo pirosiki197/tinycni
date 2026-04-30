@@ -78,6 +78,10 @@ const RTN = enum(u8) {
     XRESOLVE,
 };
 
+const IFLA_INFO_KIND = 1;
+const IFLA_INFO_DATA = 2;
+const VETH_INFO_PEER = 1;
+
 pub fn init() !Self {
     const fd = linux.socket(linux.AF.NETLINK, linux.SOCK.RAW, linux.NETLINK.ROUTE);
     if (linux.errno(fd) != .SUCCESS) return error.SocketFailed;
@@ -361,10 +365,6 @@ pub fn printIpAddresses(self: *Self) !void {
 }
 
 pub fn createVeth(self: *Self, name: []const u8, peer_name: []const u8) !void {
-    const IFLA_INFO_KIND = 1;
-    const IFLA_INFO_DATA = 2;
-    const VETH_INFO_PEER = 1;
-
     // RTM_NEWLINK
     // └─ IFLA_IFNAME = "veth0"
     // └─ IFLA_LINKINFO
@@ -443,6 +443,51 @@ pub fn createVeth(self: *Self, name: []const u8, peer_name: []const u8) !void {
     self.seq += 1;
 }
 
+pub fn createBridge(self: *Self, bridge_name: []const u8) !void {
+    var buf_array: [128]u8 = undefined;
+    const buf = buf_array[0..];
+    var offset: usize = 0;
+
+    const ifname = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.IFNAME));
+    writeCString(buf, &offset, bridge_name);
+    ifname.end(&offset);
+
+    const linkinfo = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.LINKINFO));
+    const kind = Attr.start(buf, &offset, IFLA_INFO_KIND);
+    writeCString(buf, &offset, "bridge");
+    kind.end(&offset);
+    linkinfo.end(&offset);
+
+    const total_len = @sizeOf(linux.nlmsghdr) + @sizeOf(linux.ifinfomsg) + offset;
+    const Request = extern struct {
+        hdr: linux.nlmsghdr,
+        msg: linux.ifinfomsg,
+        buf: [128]u8,
+    };
+    const req = Request{
+        .hdr = .{
+            .type = .RTM_NEWLINK,
+            .len = @truncate(total_len),
+            .flags = linux.NLM_F_REQUEST | linux.NLM_F_CREATE | linux.NLM_F_ACK,
+            .seq = self.seq,
+            .pid = 0,
+        },
+        .msg = .{
+            .family = linux.AF.UNSPEC,
+            .type = 0,
+            .flags = 0,
+            .index = 0,
+            .change = 0,
+        },
+        .buf = buf_array,
+    };
+    try self.send(std.mem.asBytes(&req)[0..total_len]);
+
+    try self.waitAck();
+
+    self.seq += 1;
+}
+
 pub fn setDefaultGateway(self: *Self, ifindex: usize, gw: [4]u8) !void {
     const Request = extern struct {
         hdr: linux.nlmsghdr,
@@ -489,6 +534,15 @@ pub fn setDefaultGateway(self: *Self, ifindex: usize, gw: [4]u8) !void {
     try self.waitAck();
 
     self.seq += 1;
+}
+
+fn send(self: Self, req: []const u8) !void {
+    const sent = linux.sendto(@intCast(self.fd), req.ptr, req.len, 0, null, 0);
+    const err = linux.errno(sent);
+    if (err != .SUCCESS) {
+        log.err("Kernel Error: {}", .{err});
+        return error.SendFailed;
+    }
 }
 
 fn waitAck(self: Self) !void {
