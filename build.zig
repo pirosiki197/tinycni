@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    if (target.result.os.tag != .linux) {
+        std.log.err("target os is not linux", .{});
+        std.process.exit(1);
+    }
+
     const mod = b.addModule("tinycni", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
