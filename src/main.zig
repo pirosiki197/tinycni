@@ -5,23 +5,27 @@ const Environ = std.process.Environ;
 
 const tinycni = @import("tinycni");
 
-const bridge_name = "tinycnibridge0";
-
 var rng: std.Random.DefaultPrng = undefined;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const gpa = init.gpa;
+    var arena = init.arena;
+    const allocator = arena.allocator();
 
     rng.seed(@truncate(@as(u96, @bitCast(std.Io.Clock.real.now(io).nanoseconds))));
 
-    const input = try Input.parse(init.environ_map);
+    var buf: [128]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().reader(io, &buf);
+    const stdin = try stdin_reader.interface.allocRemaining(allocator, .unlimited);
+    const input = try Input.parse(allocator, stdin, init.environ_map);
+
+    const gateway = try std.Io.net.Ip4Address.parse(input.config.gateway, 0);
+    const bridge_name = input.config.bridge;
 
     var host_client = try tinycni.Client.init();
     defer host_client.deinit();
 
-    const netns = try gpa.dupeSentinel(u8, input.netns, 0);
-    defer gpa.free(netns);
+    const netns = try allocator.dupeSentinel(u8, input.netns, 0);
     const netns_fd = linux.open(netns, .{}, 0);
     defer _ = linux.close(@intCast(netns_fd));
 
@@ -29,23 +33,21 @@ pub fn main(init: std.process.Init) !void {
         try host_client.createBridge(bridge_name);
         const bridge_index = try host_client.ifnameToIndex(bridge_name);
         try host_client.upLink(bridge_index);
-        try host_client.addIpv4Addr(bridge_index, [_]u8{ 10, 0, 0, 1 });
-        try configureNat(io, "eth0");
+        try host_client.addIpv4Addr(bridge_index, gateway.bytes);
+        try configureNat(io, input.config.subnet, "eth0");
         break :blk bridge_index;
     };
 
-    const host_veth_name = try generateRandomVethName(gpa);
-    defer gpa.free(host_veth_name);
-    const peer_veth_name = try generateRandomVethName(gpa);
-    defer gpa.free(peer_veth_name);
+    const host_veth_name = try generateRandomVethName(allocator);
+    const peer_veth_name = try generateRandomVethName(allocator);
 
     try host_client.createVeth(host_veth_name, peer_veth_name);
     const host_veth_index = try host_client.ifnameToIndex(host_veth_name);
     const peer_veth_index = try host_client.ifnameToIndex(peer_veth_name);
     try host_client.moveLinkToNetns(netns_fd, peer_veth_index);
 
-    try host_client.upLink(host_veth_index);
     try host_client.attachToBridge(host_veth_index, bridge_index);
+    try host_client.upLink(host_veth_index);
 
     const n = linux.setns(@intCast(netns_fd), 0);
     if (linux.errno(n) != .SUCCESS) return error.SetnsError;
@@ -62,12 +64,10 @@ pub fn main(init: std.process.Init) !void {
 
     try netns_client.addIpv4Addr(netns_veth_index, [_]u8{ 10, 0, 0, 2 });
 
-    try netns_client.setDefaultGateway(netns_veth_index, [_]u8{ 10, 0, 0, 1 });
+    try netns_client.setDefaultGateway(netns_veth_index, gateway.bytes);
 }
 
-const container_cidr = "10.0.0.0/24";
-
-fn configureNat(io: std.Io, out: []const u8) !void {
+fn configureNat(io: std.Io, subnet: []const u8, out: []const u8) !void {
     var proc = try std.process.spawn(io, .{
         .argv = &.{
             "iptables",
@@ -76,7 +76,7 @@ fn configureNat(io: std.Io, out: []const u8) !void {
             "-A",
             "POSTROUTING",
             "-s",
-            container_cidr,
+            subnet,
             "-o",
             out,
             "-j",
@@ -111,6 +111,18 @@ const Input = struct {
     netns: []const u8,
     ifname: []const u8,
 
+    config: Config,
+
+    const Config = struct {
+        cniVersion: []const u8,
+        name: []const u8,
+        type: []const u8,
+
+        bridge: []const u8,
+        subnet: []const u8,
+        gateway: []const u8,
+    };
+
     const Command = enum {
         add,
         del,
@@ -126,8 +138,10 @@ const Input = struct {
         }
     };
 
-    fn parse(env: *const Environ.Map) !Input {
-        const err = error.Invalid;
+    fn parse(arena: std.mem.Allocator, stdin: []const u8, env: *const Environ.Map) !Input {
+        const err = error.InvalidInput;
+
+        const config = try std.json.parseFromSliceLeaky(Config, arena, stdin, .{});
 
         const cmd_str = env.get("CNI_COMMAND") orelse {
             log.err("missing CNI_COMMAND", .{});
@@ -155,6 +169,8 @@ const Input = struct {
             .container_id = container_id,
             .netns = netns,
             .ifname = ifname,
+
+            .config = config,
         };
     }
 };
