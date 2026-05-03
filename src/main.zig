@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
 
     switch (input.cmd) {
         .add => try handleAdd(allocator, io, input),
-        .del => try handleDel(allocator, io, input),
+        .del => try handleDel(allocator, input),
     }
 }
 
@@ -72,10 +72,20 @@ fn handleAdd(allocator: Allocator, io: std.Io, input: Input) !void {
     try netns_client.setDefaultGateway(netns_veth_index, input.config.gateway.bytes);
 }
 
-fn handleDel(allocator: Allocator, io: std.Io, input: Input) !void {
-    _ = allocator;
-    _ = io;
-    _ = input;
+fn handleDel(allocator: Allocator, input: Input) !void {
+    const netns = try allocator.dupeSentinel(u8, input.netns, 0);
+    const netns_fd = linux.open(netns, .{}, 0);
+    if (linux.errno(netns_fd) != .SUCCESS) return;
+    defer _ = linux.close(@intCast(netns_fd));
+
+    const n = linux.setns(@intCast(netns_fd), 0);
+    if (linux.errno(n) != .SUCCESS) return error.SetnsError;
+
+    var netns_client = try tinycni.Client.init();
+    defer netns_client.deinit();
+
+    const index = netns_client.ifnameToIndex(input.ifname) catch return;
+    try netns_client.deleteInterface(index);
 }
 
 fn configureNat(io: std.Io, subnet: []const u8, out: []const u8) !void {

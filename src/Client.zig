@@ -487,6 +487,33 @@ pub fn setDefaultGateway(self: *Self, ifindex: usize, gw: [4]u8) !void {
     try self.waitAck();
 }
 
+pub fn deleteInterface(self: *Self, index: usize) !void {
+    const Request = extern struct {
+        hdr: linux.nlmsghdr,
+        msg: linux.ifinfomsg,
+    };
+    const req = Request{
+        .hdr = .{
+            .type = .RTM_DELLINK,
+            .len = @sizeOf(Request),
+            .flags = linux.NLM_F_REQUEST | linux.NLM_F_ACK,
+            .seq = self.seq,
+            .pid = 0,
+        },
+        .msg = .{
+            .family = linux.AF.UNSPEC,
+            .index = @intCast(index),
+            .flags = 0,
+            .type = 0,
+            .change = 0,
+        },
+    };
+
+    try self.send(std.mem.asBytes(&req)[0..@sizeOf(Request)]);
+
+    try self.waitAck();
+}
+
 fn send(self: Self, req: []const u8) !void {
     const sent = linux.sendto(@intCast(self.fd), req.ptr, req.len, 0, null, 0);
     const err = linux.errno(sent);
