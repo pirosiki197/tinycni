@@ -321,59 +321,6 @@ pub fn renameInterface(self: *Self, index: usize, new_name: []const u8) !void {
     try self.waitAck();
 }
 
-pub fn printLinknames(self: *Self) !void {
-    const Request = extern struct {
-        hdr: linux.nlmsghdr,
-        msg: linux.ifinfomsg,
-    };
-    var req = Request{
-        .hdr = .{
-            .len = @sizeOf(Request),
-            .type = .RTM_GETLINK,
-            .flags = linux.NLM_F_REQUEST | linux.NLM_F_DUMP,
-            .seq = self.seq,
-            .pid = 0,
-        },
-        .msg = .{
-            .family = linux.AF.UNSPEC,
-            .type = 0,
-            .index = 0,
-            .flags = 0,
-            .change = 0,
-        },
-    };
-    const sent = linux.sendto(@intCast(self.fd), std.mem.asBytes(&req), @sizeOf(Request), 0, null, 0);
-    if (linux.errno(sent) != .SUCCESS) return error.SendFailed;
-
-    var buf: [8192]u8 align(4) = undefined;
-    while (true) {
-        const n = linux.recvfrom(@intCast(self.fd), &buf, buf.len, 0, null, null);
-        if (n == 0) return;
-        if (linux.errno(n) != .SUCCESS) return error.RecvFailed;
-
-        var nl_iter = lib.NetlinkIterator(linux.ifinfomsg).init(buf[0..n]);
-        while (nl_iter.next()) |msg| {
-            if (msg.hdr.type == .DONE) return;
-
-            const ifi = msg.msg.?;
-            const flags: linux.IFF = @bitCast(@as(u16, @truncate(ifi.flags)));
-
-            var attrs = msg.attrs;
-            while (attrs.next()) |rta| {
-                if (rta.type.link == .IFNAME) {
-                    const name = lib.rtaPayload(rta);
-                    log.info("Interface {s}: {s}", .{
-                        name[0 .. name.len - 1],
-                        if (flags.UP) "UP" else "DOWN",
-                    });
-                }
-            }
-        }
-    }
-
-    self.seq += 1;
-}
-
 pub fn createVeth(self: *Self, name: []const u8, peer_name: []const u8) !void {
     // RTM_NEWLINK
     // └─ IFLA_IFNAME = "veth0"
