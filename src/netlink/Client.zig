@@ -1,89 +1,16 @@
 const std = @import("std");
 const linux = std.os.linux;
 const log = std.log;
-const lib = @import("root.zig");
-
 const Alignment = std.mem.Alignment;
+
+const tinycni = @import("tinycni");
+const netlink = tinycni.netlink;
+const Link = tinycni.net.Link;
 
 const Self = @This();
 
 fd: usize,
 seq: u32 = 0,
-
-pub const Link = struct {
-    index: u32,
-    mac: [6]u8,
-    flags: u32,
-    mtu: u32,
-};
-
-const ifaddrmsg = extern struct {
-    family: u8,
-    prefixlen: u8,
-    flags: u8,
-    scope: RT_SCOPE,
-    index: u32,
-};
-
-const rtmsg = extern struct {
-    family: u8,
-    dst_len: u8,
-    src_len: u8,
-    tos: u8,
-    table: RT_TABLE,
-    protocol: RTPROT,
-    scope: RT_SCOPE,
-    type: RTN,
-    flags: u32,
-};
-
-const nlmsgerr = extern struct {
-    err: i32,
-    msg: linux.nlmsghdr,
-};
-
-const RTPROT = enum(u8) {
-    UNSPEC = 0,
-    REDIRECT = 1,
-    KERNEL = 2,
-    BOOT = 3,
-    STATIC = 4,
-    _,
-};
-
-const RT_SCOPE = enum(u8) {
-    UNIVERSE = 0,
-    SITE = 200,
-    LINK = 253,
-    HOST = 254,
-    NOWHERE = 255,
-};
-
-const RT_TABLE = enum(u8) {
-    UNSPEC = 0,
-
-    COMPAT = 252,
-    DEFAULT = 253,
-    MAIN = 254,
-    LOCAL = 255,
-
-    _,
-};
-
-const RTN = enum(u8) {
-    UNSPEC,
-    UNICAST,
-    LOCAL,
-    BROADCAST,
-    ANYCAST,
-    MULTICAST,
-    BLACKHOLE,
-    UNREACHABLE,
-    PROHIBIT,
-    THROW,
-    NAT,
-    XRESOLVE,
-};
 
 const IFLA_INFO_KIND = 1;
 const IFLA_INFO_DATA = 2;
@@ -138,7 +65,7 @@ pub fn getLinkByName(self: *Self, name: []const u8) !Link {
     const buf = &buf_array;
     var offset: usize = 0;
 
-    const ifname = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.IFNAME));
+    const ifname = Attr.start(buf, &offset, .{ .link = .IFNAME });
     writeCString(buf, &offset, name);
     ifname.end(&offset);
 
@@ -175,7 +102,7 @@ pub fn getLinkByName(self: *Self, name: []const u8) !Link {
     const n = linux.recvfrom(@intCast(self.fd), &res_buf, res_buf.len, 0, null, null);
     if (linux.errno(n) != .SUCCESS) return error.RecvFailed;
 
-    var nl_iter = lib.NetlinkIterator(linux.ifinfomsg).init(res_buf[0..n]);
+    var nl_iter = netlink.NetlinkIterator(linux.ifinfomsg).init(res_buf[0..n]);
     while (nl_iter.next()) |msg| {
         if (msg.hdr.seq != self.seq) continue;
         if (msg.hdr.type == .ERROR) return error.NetlinkError;
@@ -187,8 +114,8 @@ pub fn getLinkByName(self: *Self, name: []const u8) !Link {
         var attrs = msg.attrs;
         while (attrs.next()) |rta| {
             switch (rta.type.link) {
-                .ADDRESS => @memcpy(link.mac[0..6], lib.rtaPayload(rta)),
-                .MTU => link.mtu = std.mem.readInt(u32, @ptrCast(lib.rtaPayload(rta)), .native),
+                .ADDRESS => @memcpy(link.mac[0..6], rta.payload()),
+                .MTU => link.mtu = std.mem.readInt(u32, @ptrCast(rta.payload()), .native),
                 else => {},
             }
         }
@@ -201,7 +128,7 @@ pub fn moveLinkToNetns(self: *Self, netns_fd: usize, veth_index: u32) !void {
     const Request = extern struct {
         hdr: linux.nlmsghdr,
         msg: linux.ifinfomsg,
-        rta: linux.rtattr,
+        rta: netlink.rtattr,
         fd: i32,
     };
     const req = Request{
@@ -221,7 +148,7 @@ pub fn moveLinkToNetns(self: *Self, netns_fd: usize, veth_index: u32) !void {
         },
         .rta = .{
             .type = .{ .link = .NET_NS_FD },
-            .len = @sizeOf(linux.rtattr) + @sizeOf(i32),
+            .len = @sizeOf(netlink.rtattr) + @sizeOf(i32),
         },
         .fd = @intCast(netns_fd),
     };
@@ -235,7 +162,7 @@ pub fn attachToBridge(self: *Self, ifindex: u32, bridge_index: u32) !void {
     const Request = extern struct {
         hdr: linux.nlmsghdr,
         msg: linux.ifinfomsg,
-        rta: linux.rtattr,
+        rta: netlink.rtattr,
         bridge_index: u32,
     };
     const req = Request{
@@ -255,7 +182,7 @@ pub fn attachToBridge(self: *Self, ifindex: u32, bridge_index: u32) !void {
         },
         .rta = .{
             .type = .{ .link = .MASTER },
-            .len = @sizeOf(linux.rtattr) + @sizeOf(u32),
+            .len = @sizeOf(netlink.rtattr) + @sizeOf(u32),
         },
         .bridge_index = bridge_index,
     };
@@ -267,8 +194,8 @@ pub fn attachToBridge(self: *Self, ifindex: u32, bridge_index: u32) !void {
 pub fn addIpv4Addr(self: *Self, index: u32, addr: [4]u8) !void {
     const AddrRequest = extern struct {
         hdr: linux.nlmsghdr,
-        msg: ifaddrmsg,
-        rta: linux.rtattr,
+        msg: netlink.ifaddrmsg,
+        rta: netlink.rtattr,
         addr: [4]u8,
     };
     var addr_req = AddrRequest{
@@ -287,7 +214,7 @@ pub fn addIpv4Addr(self: *Self, index: u32, addr: [4]u8) !void {
             .index = index,
         },
         .rta = .{
-            .len = @sizeOf(linux.rtattr) + 4,
+            .len = @sizeOf(netlink.rtattr) + 4,
             .type = .{ .addr = .LOCAL },
         },
         .addr = addr,
@@ -304,7 +231,7 @@ pub fn renameInterface(self: *Self, index: u32, new_name: []const u8) !void {
     const buf = buf_array[0..];
     var offset: usize = 0;
 
-    const rta = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.IFNAME));
+    const rta = Attr.start(buf, &offset, .{ .link = .IFNAME });
     writeCString(buf, &offset, new_name);
     rta.end(&offset);
 
@@ -351,24 +278,24 @@ pub fn createVeth(self: *Self, name: []const u8, mac: [6]u8, peer_name: []const 
     var offset: usize = 0;
 
     // -- ifname --
-    const ifname = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.IFNAME));
+    const ifname = Attr.start(buf, &offset, .{ .link = .IFNAME });
     writeCString(buf, &offset, name);
     ifname.end(&offset);
 
-    const address = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.ADDRESS));
+    const address = Attr.start(buf, &offset, .{ .link = .ADDRESS });
     writeData(buf, &offset, &mac);
     address.end(&offset);
 
     // -- link info --
-    const linkinfo = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.LINKINFO));
+    const linkinfo = Attr.start(buf, &offset, .{ .link = .LINKINFO });
 
-    const kind = Attr.start(buf, &offset, IFLA_INFO_KIND);
+    const kind = Attr.start(buf, &offset, .{ .link_info = .KIND });
     writeCString(buf, &offset, "veth");
     kind.end(&offset);
 
-    const data = Attr.start(buf, &offset, IFLA_INFO_DATA);
+    const data = Attr.start(buf, &offset, .{ .link_info = .DATA });
 
-    const peer = Attr.start(buf, &offset, VETH_INFO_PEER);
+    const peer = Attr.start(buf, &offset, .{ .veth_info = .PEER });
 
     const peer_ifi: *linux.ifinfomsg = @ptrCast(@alignCast(&buf[offset]));
     peer_ifi.* = .{
@@ -380,11 +307,11 @@ pub fn createVeth(self: *Self, name: []const u8, mac: [6]u8, peer_name: []const 
     };
     offset += @sizeOf(linux.ifinfomsg);
 
-    const peer_ifname = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.IFNAME));
+    const peer_ifname = Attr.start(buf, &offset, .{ .link = .IFNAME });
     writeCString(buf, &offset, peer_name);
     peer_ifname.end(&offset);
 
-    const peer_address = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.ADDRESS));
+    const peer_address = Attr.start(buf, &offset, .{ .link = .ADDRESS });
     writeData(buf, &offset, &peer_mac);
     peer_address.end(&offset);
 
@@ -427,12 +354,12 @@ pub fn createBridge(self: *Self, bridge_name: []const u8) !void {
     const buf = buf_array[0..];
     var offset: usize = 0;
 
-    const ifname = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.IFNAME));
+    const ifname = Attr.start(buf, &offset, .{ .link = .IFNAME });
     writeCString(buf, &offset, bridge_name);
     ifname.end(&offset);
 
-    const linkinfo = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.LINKINFO));
-    const kind = Attr.start(buf, &offset, IFLA_INFO_KIND);
+    const linkinfo = Attr.start(buf, &offset, .{ .link = .LINKINFO });
+    const kind = Attr.start(buf, &offset, .{ .link_info = .KIND });
     writeCString(buf, &offset, "bridge");
     kind.end(&offset);
     linkinfo.end(&offset);
@@ -468,10 +395,10 @@ pub fn createBridge(self: *Self, bridge_name: []const u8) !void {
 pub fn setDefaultGateway(self: *Self, ifindex: u32, gw: [4]u8) !void {
     const Request = extern struct {
         hdr: linux.nlmsghdr,
-        msg: rtmsg,
-        gw_rta: linux.rtattr,
+        msg: netlink.rtmsg,
+        gw_rta: netlink.rtattr,
         gw: [4]u8,
-        oif_rta: linux.rtattr,
+        oif_rta: netlink.rtattr,
         ifindex: u32,
     };
     var req = Request{
@@ -494,12 +421,12 @@ pub fn setDefaultGateway(self: *Self, ifindex: u32, gw: [4]u8) !void {
             .flags = 0,
         },
         .gw_rta = .{
-            .len = @sizeOf(linux.rtattr) + 4,
+            .len = @sizeOf(netlink.rtattr) + 4,
             .type = .{ .link = @enumFromInt(5) }, // RTA_GATEWAY
         },
         .gw = gw,
         .oif_rta = .{
-            .len = @sizeOf(linux.rtattr) + @sizeOf(u32),
+            .len = @sizeOf(netlink.rtattr) + @sizeOf(u32),
             .type = .{ .link = @enumFromInt(4) }, // RTA_OIF
         },
         .ifindex = ifindex,
@@ -556,13 +483,13 @@ fn waitAck(self: *Self) !void {
         const err = linux.errno(n);
         if (err != .SUCCESS) return error.RecvFailed;
 
-        var it = lib.NetlinkIterator(linux.ifinfomsg).init(buf[0..n]);
+        var it = netlink.NetlinkIterator(linux.ifinfomsg).init(buf[0..n]);
         while (it.next()) |msg| {
             if (msg.hdr.seq != self.seq) continue;
 
             if (msg.hdr.type == .DONE) return;
             if (msg.hdr.type == .ERROR) {
-                const nlerr: *const nlmsgerr = @ptrCast(@alignCast(msg.msg.?));
+                const nlerr: *const netlink.nlmsgerr = @ptrCast(@alignCast(msg.msg.?));
                 if (nlerr.err == 0) return;
                 log.err("Kernel Error: {} (seq: {})", .{ -nlerr.err, self.seq });
                 return error.NetlinkKernelError;
@@ -573,14 +500,14 @@ fn waitAck(self: *Self) !void {
 
 const Attr = struct {
     s: usize,
-    rta: *linux.rtattr,
+    rta: *netlink.rtattr,
 
-    fn start(buf: []u8, offset: *usize, rta_type: u16) Attr {
+    fn start(buf: []u8, offset: *usize, rta_type: netlink.rtattr.Type) Attr {
         const s = offset.*;
-        const rta: *linux.rtattr = @ptrCast(@alignCast(&buf[offset.*]));
-        rta.type = .{ .link = @enumFromInt(rta_type) };
-        rta.len = @sizeOf(linux.rtattr);
-        offset.* += @sizeOf(linux.rtattr);
+        const rta: *netlink.rtattr = @ptrCast(@alignCast(&buf[offset.*]));
+        rta.type = rta_type;
+        rta.len = @sizeOf(netlink.rtattr);
+        offset.* += @sizeOf(netlink.rtattr);
 
         return .{
             .s = s,

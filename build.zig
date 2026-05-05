@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    mod.addImport("tinycni", mod);
 
     const exe = b.addExecutable(.{
         .name = "tinycni",

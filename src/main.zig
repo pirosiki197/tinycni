@@ -4,8 +4,9 @@ const log = std.log;
 const Allocator = std.mem.Allocator;
 
 const tinycni = @import("tinycni");
-const Ipv4Addr = tinycni.Ipv4Addr;
-const Ipv4Net = tinycni.Ipv4Net;
+const Client = tinycni.netlink.Client;
+const Ipv4Addr = tinycni.net.Ipv4Addr;
+const Ipv4Net = tinycni.net.Ipv4Net;
 
 var rng: std.Random.DefaultPrng = undefined;
 
@@ -28,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn handleAdd(allocator: Allocator, io: std.Io, input: Input) !void {
-    var host_client = try tinycni.Client.init();
+    var host_client = try Client.init();
     defer host_client.deinit();
 
     const netns = try allocator.dupeSentinel(u8, input.netns, 0);
@@ -59,7 +60,7 @@ fn handleAdd(allocator: Allocator, io: std.Io, input: Input) !void {
     const n = linux.setns(@intCast(netns_fd), 0);
     if (linux.errno(n) != .SUCCESS) return error.SetnsError;
 
-    var netns_client = try tinycni.Client.init();
+    var netns_client = try Client.init();
     defer netns_client.deinit();
 
     const netns_veth = try netns_client.getLinkByName(peer_veth_name);
@@ -109,7 +110,7 @@ fn handleDel(allocator: Allocator, input: Input) !void {
     const n = linux.setns(@intCast(netns_fd), 0);
     if (linux.errno(n) != .SUCCESS) return error.SetnsError;
 
-    var netns_client = try tinycni.Client.init();
+    var netns_client = try Client.init();
     defer netns_client.deinit();
 
     const interface = netns_client.getLinkByName(input.ifname) catch return;
