@@ -1,0 +1,9 @@
+{
+  "cniVersion": "1.0.0",
+  "name": "mynet",
+  "type": "tinycni",
+
+  "bridge": "tinycnibridge0",
+  "subnet": "10.0.0.0/24",
+  "gateway": "10.0.0.1"
+}
