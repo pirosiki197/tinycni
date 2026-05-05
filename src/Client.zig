@@ -10,6 +10,13 @@ const Self = @This();
 fd: usize,
 seq: u32 = 0,
 
+pub const Link = struct {
+    index: u32,
+    mac: [6]u8,
+    flags: u32,
+    mtu: u32,
+};
+
 const ifaddrmsg = extern struct {
     family: u8,
     prefixlen: u8,
@@ -94,7 +101,7 @@ pub fn deinit(self: Self) void {
     _ = linux.close(@intCast(self.fd));
 }
 
-pub fn upLink(self: *Self, index: usize) !void {
+pub fn upLink(self: *Self, index: u32) !void {
     const flags = linux.IFF{
         .UP = true,
     };
@@ -126,16 +133,26 @@ pub fn upLink(self: *Self, index: usize) !void {
     try self.waitAck();
 }
 
-pub fn ifnameToIndex(self: *Self, name: []const u8) !usize {
+pub fn getLinkByName(self: *Self, name: []const u8) !Link {
+    var buf_array: [64]u8 = undefined;
+    const buf = &buf_array;
+    var offset: usize = 0;
+
+    const ifname = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.IFNAME));
+    writeCString(buf, &offset, name);
+    ifname.end(&offset);
+
+    const total_len = @sizeOf(linux.nlmsghdr) + @sizeOf(linux.ifinfomsg) + offset;
     const Request = extern struct {
         hdr: linux.nlmsghdr,
         msg: linux.ifinfomsg,
+        buf: [64]u8,
     };
     var req = Request{
         .hdr = .{
-            .len = @sizeOf(Request),
+            .len = @truncate(total_len),
             .type = .RTM_GETLINK,
-            .flags = linux.NLM_F_REQUEST | linux.NLM_F_DUMP,
+            .flags = linux.NLM_F_REQUEST,
             .seq = self.seq,
             .pid = 0,
         },
@@ -146,43 +163,41 @@ pub fn ifnameToIndex(self: *Self, name: []const u8) !usize {
             .flags = 0,
             .change = 0,
         },
+        .buf = buf_array,
     };
-    const sent = linux.sendto(@intCast(self.fd), std.mem.asBytes(&req), @sizeOf(Request), 0, null, 0);
-    if (linux.errno(sent) != .SUCCESS) return error.SendFailed;
+    try self.send(std.mem.asBytes(&req)[0..total_len]);
 
     defer self.seq += 1;
 
-    var buf: [8192]u8 align(4) = undefined;
-    while (true) {
-        const n = linux.recvfrom(@intCast(self.fd), &buf, buf.len, 0, null, null);
-        if (n == 0) return error.NotFound;
-        if (linux.errno(n) != .SUCCESS) return error.RecvFailed;
+    var res_buf: [8192]u8 align(4) = undefined;
+    var link: Link = undefined;
 
-        var nl_iter = lib.NetlinkIterator(linux.ifinfomsg).init(buf[0..n]);
-        while (nl_iter.next()) |msg| {
-            if (msg.hdr.seq != self.seq) continue;
+    const n = linux.recvfrom(@intCast(self.fd), &res_buf, res_buf.len, 0, null, null);
+    if (linux.errno(n) != .SUCCESS) return error.RecvFailed;
 
-            if (msg.hdr.type == .DONE) return error.NotFound;
-            if (msg.hdr.type == .ERROR) return error.NetlinkError;
+    var nl_iter = lib.NetlinkIterator(linux.ifinfomsg).init(res_buf[0..n]);
+    while (nl_iter.next()) |msg| {
+        if (msg.hdr.seq != self.seq) continue;
+        if (msg.hdr.type == .ERROR) return error.NetlinkError;
 
-            const ifi = msg.msg.?;
+        const ifi = msg.msg.?;
+        link.index = @intCast(ifi.index);
+        link.flags = ifi.flags;
 
-            var attrs = msg.attrs;
-            while (attrs.next()) |rta| {
-                if (rta.type.link == .IFNAME) {
-                    const ifname = lib.rtaPayload(rta);
-                    if (std.mem.eql(u8, name, ifname[0 .. ifname.len - 1])) {
-                        return @intCast(ifi.index);
-                    }
-                }
+        var attrs = msg.attrs;
+        while (attrs.next()) |rta| {
+            switch (rta.type.link) {
+                .ADDRESS => @memcpy(link.mac[0..6], lib.rtaPayload(rta)),
+                .MTU => link.mtu = std.mem.readInt(u32, @ptrCast(lib.rtaPayload(rta)), .native),
+                else => {},
             }
         }
     }
 
-    return error.NotFound;
+    return link;
 }
 
-pub fn moveLinkToNetns(self: *Self, netns_fd: usize, veth_index: usize) !void {
+pub fn moveLinkToNetns(self: *Self, netns_fd: usize, veth_index: u32) !void {
     const Request = extern struct {
         hdr: linux.nlmsghdr,
         msg: linux.ifinfomsg,
@@ -216,7 +231,7 @@ pub fn moveLinkToNetns(self: *Self, netns_fd: usize, veth_index: usize) !void {
     try self.waitAck();
 }
 
-pub fn attachToBridge(self: *Self, ifindex: usize, bridge_index: usize) !void {
+pub fn attachToBridge(self: *Self, ifindex: u32, bridge_index: u32) !void {
     const Request = extern struct {
         hdr: linux.nlmsghdr,
         msg: linux.ifinfomsg,
@@ -242,14 +257,14 @@ pub fn attachToBridge(self: *Self, ifindex: usize, bridge_index: usize) !void {
             .type = .{ .link = .MASTER },
             .len = @sizeOf(linux.rtattr) + @sizeOf(u32),
         },
-        .bridge_index = @truncate(bridge_index),
+        .bridge_index = bridge_index,
     };
     try self.send(std.mem.asBytes(&req)[0..@sizeOf(Request)]);
 
     try self.waitAck();
 }
 
-pub fn addIpv4Addr(self: *Self, index: usize, addr: [4]u8) !void {
+pub fn addIpv4Addr(self: *Self, index: u32, addr: [4]u8) !void {
     const AddrRequest = extern struct {
         hdr: linux.nlmsghdr,
         msg: ifaddrmsg,
@@ -269,7 +284,7 @@ pub fn addIpv4Addr(self: *Self, index: usize, addr: [4]u8) !void {
             .prefixlen = 24,
             .flags = 0,
             .scope = .UNIVERSE,
-            .index = @truncate(index),
+            .index = index,
         },
         .rta = .{
             .len = @sizeOf(linux.rtattr) + 4,
@@ -284,7 +299,7 @@ pub fn addIpv4Addr(self: *Self, index: usize, addr: [4]u8) !void {
     try self.waitAck();
 }
 
-pub fn renameInterface(self: *Self, index: usize, new_name: []const u8) !void {
+pub fn renameInterface(self: *Self, index: u32, new_name: []const u8) !void {
     var buf_array: [64]u8 = undefined;
     const buf = buf_array[0..];
     var offset: usize = 0;
@@ -321,9 +336,10 @@ pub fn renameInterface(self: *Self, index: usize, new_name: []const u8) !void {
     try self.waitAck();
 }
 
-pub fn createVeth(self: *Self, name: []const u8, peer_name: []const u8) !void {
+pub fn createVeth(self: *Self, name: []const u8, mac: [6]u8, peer_name: []const u8, peer_mac: [6]u8) !void {
     // RTM_NEWLINK
     // └─ IFLA_IFNAME = "veth0"
+    // └─ IFLA_ADDRESS = mac
     // └─ IFLA_LINKINFO
     //     └─ kind = "veth"
     //     └─ data
@@ -338,6 +354,10 @@ pub fn createVeth(self: *Self, name: []const u8, peer_name: []const u8) !void {
     const ifname = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.IFNAME));
     writeCString(buf, &offset, name);
     ifname.end(&offset);
+
+    const address = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.ADDRESS));
+    writeData(buf, &offset, &mac);
+    address.end(&offset);
 
     // -- link info --
     const linkinfo = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.LINKINFO));
@@ -363,6 +383,10 @@ pub fn createVeth(self: *Self, name: []const u8, peer_name: []const u8) !void {
     const peer_ifname = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.IFNAME));
     writeCString(buf, &offset, peer_name);
     peer_ifname.end(&offset);
+
+    const peer_address = Attr.start(buf, &offset, @intFromEnum(linux.IFLA.ADDRESS));
+    writeData(buf, &offset, &peer_mac);
+    peer_address.end(&offset);
 
     peer.end(&offset);
     data.end(&offset);
@@ -441,7 +465,7 @@ pub fn createBridge(self: *Self, bridge_name: []const u8) !void {
     try self.waitAck();
 }
 
-pub fn setDefaultGateway(self: *Self, ifindex: usize, gw: [4]u8) !void {
+pub fn setDefaultGateway(self: *Self, ifindex: u32, gw: [4]u8) !void {
     const Request = extern struct {
         hdr: linux.nlmsghdr,
         msg: rtmsg,
@@ -478,7 +502,7 @@ pub fn setDefaultGateway(self: *Self, ifindex: usize, gw: [4]u8) !void {
             .len = @sizeOf(linux.rtattr) + @sizeOf(u32),
             .type = .{ .link = @enumFromInt(4) }, // RTA_OIF
         },
-        .ifindex = @truncate(ifindex),
+        .ifindex = ifindex,
     };
 
     const sent = linux.sendto(@intCast(self.fd), std.mem.asBytes(&req), @sizeOf(Request), 0, null, 0);
@@ -487,7 +511,7 @@ pub fn setDefaultGateway(self: *Self, ifindex: usize, gw: [4]u8) !void {
     try self.waitAck();
 }
 
-pub fn deleteInterface(self: *Self, index: usize) !void {
+pub fn deleteInterface(self: *Self, index: u32) !void {
     const Request = extern struct {
         hdr: linux.nlmsghdr,
         msg: linux.ifinfomsg,
@@ -575,4 +599,9 @@ fn writeCString(buf: []u8, offset: *usize, s: []const u8) void {
     offset.* += s.len;
     buf[offset.*] = 0;
     offset.* += 1;
+}
+
+fn writeData(buf: []u8, offset: *usize, data: []const u8) void {
+    @memcpy(buf[offset.*..].ptr, data);
+    offset.* += data.len;
 }

@@ -4,6 +4,8 @@ const log = std.log;
 const Allocator = std.mem.Allocator;
 
 const tinycni = @import("tinycni");
+const Ipv4Addr = tinycni.Ipv4Addr;
+const Ipv4Net = tinycni.Ipv4Net;
 
 var rng: std.Random.DefaultPrng = undefined;
 
@@ -34,25 +36,25 @@ fn handleAdd(allocator: Allocator, io: std.Io, input: Input) !void {
     defer _ = linux.close(@intCast(netns_fd));
 
     const bridge_name = input.config.bridge;
-    const bridge_index = host_client.ifnameToIndex(bridge_name) catch blk: {
+    const bridge = host_client.getLinkByName(bridge_name) catch blk: {
         try host_client.createBridge(bridge_name);
-        const bridge_index = try host_client.ifnameToIndex(bridge_name);
-        try host_client.upLink(bridge_index);
-        try host_client.addIpv4Addr(bridge_index, input.config.gateway.bytes);
-        try configureNat(io, input.config.subnet, "eth0");
-        break :blk bridge_index;
+        const bridge = try host_client.getLinkByName(bridge_name);
+        try host_client.upLink(bridge.index);
+        try host_client.addIpv4Addr(bridge.index, input.config.gateway.bytes);
+        try configureNat(io, try input.config.subnet.string(allocator), "eth0");
+        break :blk bridge;
     };
 
-    const host_veth_name = try generateRandomVethName(allocator);
-    const peer_veth_name = try generateRandomVethName(allocator);
+    const host_veth_name = try generateVethName(allocator);
+    const peer_veth_name = try generateVethName(allocator);
 
-    try host_client.createVeth(host_veth_name, peer_veth_name);
-    const host_veth_index = try host_client.ifnameToIndex(host_veth_name);
-    const peer_veth_index = try host_client.ifnameToIndex(peer_veth_name);
-    try host_client.moveLinkToNetns(netns_fd, peer_veth_index);
+    try host_client.createVeth(host_veth_name, generateMac(), peer_veth_name, generateMac());
+    const host_veth = try host_client.getLinkByName(host_veth_name);
+    const peer_veth = try host_client.getLinkByName(peer_veth_name);
+    try host_client.moveLinkToNetns(netns_fd, peer_veth.index);
 
-    try host_client.attachToBridge(host_veth_index, bridge_index);
-    try host_client.upLink(host_veth_index);
+    try host_client.attachToBridge(host_veth.index, bridge.index);
+    try host_client.upLink(host_veth.index);
 
     const n = linux.setns(@intCast(netns_fd), 0);
     if (linux.errno(n) != .SUCCESS) return error.SetnsError;
@@ -60,16 +62,42 @@ fn handleAdd(allocator: Allocator, io: std.Io, input: Input) !void {
     var netns_client = try tinycni.Client.init();
     defer netns_client.deinit();
 
-    const netns_veth_index = try netns_client.ifnameToIndex(peer_veth_name);
+    const netns_veth = try netns_client.getLinkByName(peer_veth_name);
 
-    try netns_client.renameInterface(netns_veth_index, input.ifname);
+    try netns_client.renameInterface(netns_veth.index, input.ifname);
 
     try netns_client.upLink(1); // lo
-    try netns_client.upLink(netns_veth_index);
+    try netns_client.upLink(netns_veth.index);
 
-    try netns_client.addIpv4Addr(netns_veth_index, [_]u8{ 10, 0, 0, 2 });
+    try netns_client.addIpv4Addr(netns_veth.index, [_]u8{ 10, 0, 0, 2 });
 
-    try netns_client.setDefaultGateway(netns_veth_index, input.config.gateway.bytes);
+    try netns_client.setDefaultGateway(netns_veth.index, input.config.gateway.bytes);
+
+    const result = Result{
+        .cniVersion = "1.0.0",
+        .interfaces = &.{
+            .{
+                .name = host_veth_name,
+                .mac = &formatMac(host_veth.mac),
+            },
+            .{
+                .name = input.ifname,
+                .mac = &formatMac(peer_veth.mac),
+                .sandbox = input.netns,
+            },
+        },
+        .ips = &.{
+            .{
+                .address = "10.0.0.2/24",
+                .gateway = try input.config.gateway.string(allocator),
+                .interface = 1,
+            },
+        },
+        .routes = &.{},
+        .dns = .{},
+    };
+    var stdout_writer = std.Io.File.stdout().writer(io, &.{});
+    try std.json.fmt(result, .{}).format(&stdout_writer.interface);
 }
 
 fn handleDel(allocator: Allocator, input: Input) !void {
@@ -84,8 +112,8 @@ fn handleDel(allocator: Allocator, input: Input) !void {
     var netns_client = try tinycni.Client.init();
     defer netns_client.deinit();
 
-    const index = netns_client.ifnameToIndex(input.ifname) catch return;
-    try netns_client.deleteInterface(index);
+    const interface = netns_client.getLinkByName(input.ifname) catch return;
+    try netns_client.deleteInterface(interface.index);
 }
 
 fn configureNat(io: std.Io, subnet: []const u8, out: []const u8) !void {
@@ -107,7 +135,7 @@ fn configureNat(io: std.Io, subnet: []const u8, out: []const u8) !void {
     _ = try proc.wait(io);
 }
 
-fn generateRandomVethName(allocator: Allocator) ![]const u8 {
+fn generateVethName(allocator: Allocator) ![]const u8 {
     const chars = "1234567890abcdefghijklmnopqrstuvvwxyz";
     const prefix = "veth_";
     const rand_len = 6;
@@ -123,6 +151,29 @@ fn generateRandomVethName(allocator: Allocator) ![]const u8 {
         n /= chars.len;
     }
 
+    return res;
+}
+
+fn generateMac() [6]u8 {
+    var mac: [6]u8 = undefined;
+    rng.fill(&mac);
+    // unicast & locally administered address
+    mac[0] = (mac[0] & 0xFE) | 0x02;
+    return mac;
+}
+
+fn formatMac(mac: [6]u8) [17]u8 {
+    var res: [17]u8 = undefined;
+    var i: usize = 0;
+    for (mac) |d| {
+        res[i] = std.fmt.hex_charset[d >> 4];
+        res[i + 1] = std.fmt.hex_charset[d & 15];
+        i += 2;
+        if (i != res.len) {
+            res[i] = ':';
+            i += 1;
+        }
+    }
     return res;
 }
 
@@ -142,8 +193,8 @@ const Input = struct {
         type: []const u8,
 
         bridge: []const u8,
-        subnet: []const u8,
-        gateway: Ip4Address,
+        subnet: Ipv4Net,
+        gateway: Ipv4Addr,
     };
 
     const Command = enum {
@@ -175,14 +226,13 @@ const Input = struct {
         const err = error.InvalidInput;
 
         const raw_config = try std.json.parseFromSliceLeaky(StdinJson, arena, stdin, .{});
-        const gateway = try Ip4Address.parse(raw_config.gateway, 0);
         const config = Config{
             .cni_version = raw_config.cniVersion,
             .name = raw_config.name,
             .type = raw_config.type,
             .bridge = raw_config.bridge,
-            .subnet = raw_config.subnet,
-            .gateway = gateway,
+            .subnet = try .parse(raw_config.subnet),
+            .gateway = try .parse(raw_config.gateway),
         };
 
         const cmd_str = env.get("CNI_COMMAND") orelse {
@@ -215,4 +265,31 @@ const Input = struct {
             .config = config,
         };
     }
+};
+
+const Result = struct {
+    cniVersion: []const u8,
+
+    interfaces: []const Interface,
+    ips: []const IpConfig,
+    routes: []const Route,
+
+    dns: struct {},
+
+    const Interface = struct {
+        name: []const u8,
+        mac: []const u8,
+        sandbox: ?[]const u8 = null,
+    };
+
+    const IpConfig = struct {
+        address: []const u8,
+        gateway: []const u8,
+        interface: usize,
+    };
+
+    const Route = struct {
+        dst: []const u8,
+        gw: []const u8,
+    };
 };
