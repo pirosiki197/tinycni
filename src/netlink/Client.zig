@@ -11,16 +11,14 @@ const Self = @This();
 
 fd: usize,
 seq: u32 = 0,
+rng: std.Random,
 
-const IFLA_INFO_KIND = 1;
-const IFLA_INFO_DATA = 2;
-const VETH_INFO_PEER = 1;
-
-pub fn init() !Self {
+pub fn init(rng: std.Random) !Self {
     const fd = linux.socket(linux.AF.NETLINK, linux.SOCK.RAW, linux.NETLINK.ROUTE);
     if (linux.errno(fd) != .SUCCESS) return error.SocketFailed;
     return .{
         .fd = fd,
+        .rng = rng,
     };
 }
 
@@ -114,7 +112,11 @@ pub fn getLinkByName(self: *Self, name: []const u8) !Link {
         var attrs = msg.attrs;
         while (attrs.next()) |rta| {
             switch (rta.type.link) {
-                .ADDRESS => @memcpy(link.mac[0..6], rta.payload()),
+                .ADDRESS => {
+                    var mac: [6]u8 = undefined;
+                    @memcpy(&mac, rta.payload());
+                    link.mac = .fromBytes(mac);
+                },
                 .MTU => link.mtu = std.mem.readInt(u32, @ptrCast(rta.payload()), .native),
                 else => {},
             }
@@ -263,7 +265,7 @@ pub fn renameInterface(self: *Self, index: u32, new_name: []const u8) !void {
     try self.waitAck();
 }
 
-pub fn createVeth(self: *Self, name: []const u8, mac: [6]u8, peer_name: []const u8, peer_mac: [6]u8) !void {
+pub fn createVeth(self: *Self, name: []const u8, peer_name: []const u8) !void {
     // RTM_NEWLINK
     // └─ IFLA_IFNAME = "veth0"
     // └─ IFLA_ADDRESS = mac
@@ -272,6 +274,11 @@ pub fn createVeth(self: *Self, name: []const u8, mac: [6]u8, peer_name: []const 
     //     └─ data
     //         └─ VETH_INFO_PEER
     //             └─ (peer ifinfomsg + attrs)
+
+    var mac: [6]u8 = undefined;
+    self.rng.bytes(&mac);
+    var peer_mac: [6]u8 = undefined;
+    self.rng.bytes(&peer_mac);
 
     var buf_array: [512]u8 align(4) = undefined;
     const buf = buf_array[0..];

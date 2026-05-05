@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 
 pub const Link = struct {
     index: u32,
-    mac: [6]u8,
+    mac: Mac,
     flags: u32,
     mtu: u32,
 };
@@ -108,5 +108,32 @@ pub const Ipv4Net = struct {
     fn format(ipv4net: Ipv4Net, w: *std.Io.Writer) !void {
         const bytes = ipv4net.addr.bytes;
         try w.print("{d}.{d}.{d}.{d}/{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3], ipv4net.prefix_len });
+    }
+};
+
+pub const Mac = struct {
+    bytes: [6]u8,
+
+    pub fn fromBytes(bytes: [6]u8) Mac {
+        return .{ .bytes = bytes };
+    }
+
+    pub fn string(mac: Mac, allocator: Allocator) ![]u8 {
+        const buf = try allocator.alloc(u8, 17);
+        var w = std.Io.Writer.fixed(buf);
+        try mac.format(&w);
+        return w.buffered();
+    }
+
+    fn format(mac: Mac, w: *std.Io.Writer) !void {
+        const bytes = mac.bytes;
+        try w.print("{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+        });
     }
 };

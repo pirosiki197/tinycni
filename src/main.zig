@@ -8,14 +8,14 @@ const Client = tinycni.netlink.Client;
 const Ipv4Addr = tinycni.net.Ipv4Addr;
 const Ipv4Net = tinycni.net.Ipv4Net;
 
-var rng: std.Random.DefaultPrng = undefined;
-
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var arena = init.arena;
     const allocator = arena.allocator();
 
-    rng.seed(@truncate(@as(u96, @bitCast(std.Io.Clock.real.now(io).nanoseconds))));
+    const seed: u64 = @truncate(@as(u96, @bitCast(std.Io.Clock.real.now(io).nanoseconds)));
+    var rng = std.Random.DefaultPrng.init(seed);
+    const rand = rng.random();
 
     var buf: [128]u8 = undefined;
     var stdin_reader = std.Io.File.stdin().reader(io, &buf);
@@ -23,13 +23,13 @@ pub fn main(init: std.process.Init) !void {
     const input = try Input.parse(allocator, stdin, init.environ_map);
 
     switch (input.cmd) {
-        .add => try handleAdd(allocator, io, input),
-        .del => try handleDel(allocator, input),
+        .add => try handleAdd(allocator, io, rand, input),
+        .del => try handleDel(allocator, rand, input),
     }
 }
 
-fn handleAdd(allocator: Allocator, io: std.Io, input: Input) !void {
-    var host_client = try Client.init();
+fn handleAdd(allocator: Allocator, io: std.Io, rand: std.Random, input: Input) !void {
+    var host_client = try Client.init(rand);
     defer host_client.deinit();
 
     const netns = try allocator.dupeSentinel(u8, input.netns, 0);
@@ -46,10 +46,10 @@ fn handleAdd(allocator: Allocator, io: std.Io, input: Input) !void {
         break :blk bridge;
     };
 
-    const host_veth_name = try generateVethName(allocator);
-    const peer_veth_name = try generateVethName(allocator);
+    const host_veth_name = try generateVethName(allocator, rand);
+    const peer_veth_name = try generateVethName(allocator, rand);
 
-    try host_client.createVeth(host_veth_name, generateMac(), peer_veth_name, generateMac());
+    try host_client.createVeth(host_veth_name, peer_veth_name);
     const host_veth = try host_client.getLinkByName(host_veth_name);
     const peer_veth = try host_client.getLinkByName(peer_veth_name);
     try host_client.moveLinkToNetns(netns_fd, peer_veth.index);
@@ -60,7 +60,7 @@ fn handleAdd(allocator: Allocator, io: std.Io, input: Input) !void {
     const n = linux.setns(@intCast(netns_fd), 0);
     if (linux.errno(n) != .SUCCESS) return error.SetnsError;
 
-    var netns_client = try Client.init();
+    var netns_client = try Client.init(rand);
     defer netns_client.deinit();
 
     const netns_veth = try netns_client.getLinkByName(peer_veth_name);
@@ -79,11 +79,11 @@ fn handleAdd(allocator: Allocator, io: std.Io, input: Input) !void {
         .interfaces = &.{
             .{
                 .name = host_veth_name,
-                .mac = &formatMac(host_veth.mac),
+                .mac = try host_veth.mac.string(allocator),
             },
             .{
                 .name = input.ifname,
-                .mac = &formatMac(peer_veth.mac),
+                .mac = try peer_veth.mac.string(allocator),
                 .sandbox = input.netns,
             },
         },
@@ -101,7 +101,7 @@ fn handleAdd(allocator: Allocator, io: std.Io, input: Input) !void {
     try std.json.fmt(result, .{}).format(&stdout_writer.interface);
 }
 
-fn handleDel(allocator: Allocator, input: Input) !void {
+fn handleDel(allocator: Allocator, rand: std.Random, input: Input) !void {
     const netns = try allocator.dupeSentinel(u8, input.netns, 0);
     const netns_fd = linux.open(netns, .{}, 0);
     if (linux.errno(netns_fd) != .SUCCESS) return;
@@ -110,7 +110,7 @@ fn handleDel(allocator: Allocator, input: Input) !void {
     const n = linux.setns(@intCast(netns_fd), 0);
     if (linux.errno(n) != .SUCCESS) return error.SetnsError;
 
-    var netns_client = try Client.init();
+    var netns_client = try Client.init(rand);
     defer netns_client.deinit();
 
     const interface = netns_client.getLinkByName(input.ifname) catch return;
@@ -136,13 +136,13 @@ fn configureNat(io: std.Io, subnet: []const u8, out: []const u8) !void {
     _ = try proc.wait(io);
 }
 
-fn generateVethName(allocator: Allocator) ![]const u8 {
+fn generateVethName(allocator: Allocator, rand: std.Random) ![]const u8 {
     const chars = "1234567890abcdefghijklmnopqrstuvvwxyz";
     const prefix = "veth_";
     const rand_len = 6;
 
     var buf: [4]u8 = undefined;
-    rng.fill(buf[0..]);
+    rand.bytes(&buf);
     var n: u32 = std.mem.readInt(u32, &buf, .native);
 
     const res = try allocator.alloc(u8, prefix.len + rand_len);
@@ -152,29 +152,6 @@ fn generateVethName(allocator: Allocator) ![]const u8 {
         n /= chars.len;
     }
 
-    return res;
-}
-
-fn generateMac() [6]u8 {
-    var mac: [6]u8 = undefined;
-    rng.fill(&mac);
-    // unicast & locally administered address
-    mac[0] = (mac[0] & 0xFE) | 0x02;
-    return mac;
-}
-
-fn formatMac(mac: [6]u8) [17]u8 {
-    var res: [17]u8 = undefined;
-    var i: usize = 0;
-    for (mac) |d| {
-        res[i] = std.fmt.hex_charset[d >> 4];
-        res[i + 1] = std.fmt.hex_charset[d & 15];
-        i += 2;
-        if (i != res.len) {
-            res[i] = ':';
-            i += 1;
-        }
-    }
     return res;
 }
 
