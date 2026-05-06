@@ -2,6 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const log = std.log;
 const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 
 const tinycni = @import("tinycni");
 const Client = tinycni.netlink.Client;
@@ -20,15 +21,17 @@ pub fn main(init: std.process.Init) !void {
     var buf: [128]u8 = undefined;
     var stdin_reader = std.Io.File.stdin().reader(io, &buf);
     const stdin = try stdin_reader.interface.allocRemaining(allocator, .unlimited);
-    const input = try Input.parse(allocator, stdin, init.environ_map);
+    const input = try Input.parse(arena, stdin, init.environ_map);
 
     switch (input.cmd) {
-        .add => try handleAdd(allocator, io, rand, input),
-        .del => try handleDel(allocator, rand, input),
+        .add => try handleAdd(arena, io, rand, input),
+        .del => try handleDel(arena, rand, input),
     }
 }
 
-fn handleAdd(allocator: Allocator, io: std.Io, rand: std.Random, input: Input) !void {
+fn handleAdd(arena: *ArenaAllocator, io: std.Io, rand: std.Random, input: Input) !void {
+    const allocator = arena.allocator();
+
     var host_client = try Client.init(rand);
     defer host_client.deinit();
 
@@ -101,7 +104,9 @@ fn handleAdd(allocator: Allocator, io: std.Io, rand: std.Random, input: Input) !
     try std.json.fmt(result, .{}).format(&stdout_writer.interface);
 }
 
-fn handleDel(allocator: Allocator, rand: std.Random, input: Input) !void {
+fn handleDel(arena: *ArenaAllocator, rand: std.Random, input: Input) !void {
+    const allocator = arena.allocator();
+
     const netns = try allocator.dupeSentinel(u8, input.netns, 0);
     const netns_fd = linux.open(netns, .{}, 0);
     if (linux.errno(netns_fd) != .SUCCESS) return;
@@ -190,7 +195,9 @@ const Input = struct {
         }
     };
 
-    fn parse(arena: Allocator, stdin: []const u8, env: *const std.process.Environ.Map) !Input {
+    fn parse(arena: *ArenaAllocator, stdin: []const u8, env: *const std.process.Environ.Map) !Input {
+        const allocator = arena.allocator();
+
         const StdinJson = struct {
             cniVersion: []const u8,
             name: []const u8,
@@ -203,7 +210,7 @@ const Input = struct {
 
         const err = error.InvalidInput;
 
-        const raw_config = try std.json.parseFromSliceLeaky(StdinJson, arena, stdin, .{});
+        const raw_config = try std.json.parseFromSliceLeaky(StdinJson, allocator, stdin, .{});
         const config = Config{
             .cni_version = raw_config.cniVersion,
             .name = raw_config.name,
