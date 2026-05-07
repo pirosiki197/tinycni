@@ -11,14 +11,14 @@ const Self = @This();
 
 fd: usize,
 seq: u32 = 0,
-rng: std.Random,
+rand: std.Random,
 
 pub fn init(rng: std.Random) !Self {
     const fd = linux.socket(linux.AF.NETLINK, linux.SOCK.RAW, linux.NETLINK.ROUTE);
     if (linux.errno(fd) != .SUCCESS) return error.SocketFailed;
     return .{
         .fd = fd,
-        .rng = rng,
+        .rand = rng,
     };
 }
 
@@ -275,10 +275,8 @@ pub fn createVeth(self: *Self, name: []const u8, peer_name: []const u8) !void {
     //         └─ VETH_INFO_PEER
     //             └─ (peer ifinfomsg + attrs)
 
-    var mac: [6]u8 = undefined;
-    self.rng.bytes(&mac);
-    var peer_mac: [6]u8 = undefined;
-    self.rng.bytes(&peer_mac);
+    const mac = generateMac(self.rand);
+    const peer_mac = generateMac(self.rand);
 
     var buf_array: [512]u8 align(4) = undefined;
     const buf = buf_array[0..];
@@ -538,4 +536,12 @@ fn writeCString(buf: []u8, offset: *usize, s: []const u8) void {
 fn writeData(buf: []u8, offset: *usize, data: []const u8) void {
     @memcpy(buf[offset.*..].ptr, data);
     offset.* += data.len;
+}
+
+fn generateMac(rand: std.Random) [6]u8 {
+    var mac: [6]u8 = undefined;
+    rand.bytes(&mac);
+    // unicast & locally administered address
+    mac[0] = (mac[0] & 0xFE) | 0x02;
+    return mac;
 }
