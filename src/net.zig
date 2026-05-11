@@ -50,6 +50,21 @@ pub const Ipv4Addr = struct {
         return error.Incomplete;
     }
 
+    pub fn asu32(addr: Ipv4Addr) u32 {
+        return @as(u32, addr.bytes[0]) << 24 | @as(u32, addr.bytes[1]) << 16 | @as(u32, addr.bytes[2]) << 8 | @as(u32, addr.bytes[3]);
+    }
+
+    pub fn fromu32(addr: u32) Ipv4Addr {
+        return .{
+            .bytes = [_]u8{
+                @truncate(addr >> 24),
+                @truncate(addr >> 16),
+                @truncate(addr >> 8),
+                @truncate(addr),
+            },
+        };
+    }
+
     pub fn string(addr: Ipv4Addr, allocator: Allocator) ![]const u8 {
         const buf = try allocator.alloc(u8, 15);
         var w = std.Io.Writer.fixed(buf);
@@ -92,8 +107,11 @@ pub const Ipv4Net = struct {
             },
             else => return error.InvalidCharacter,
         };
+
+        const network_addr = addr.asu32() & ~(@as(u32, 1) << @as(u5, @truncate(32 - prefix_len)) - 1);
+
         return .{
-            .addr = addr,
+            .addr = .fromu32(network_addr),
             .prefix_len = prefix_len,
         };
     }

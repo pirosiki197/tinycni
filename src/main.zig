@@ -73,7 +73,10 @@ fn handleAdd(arena: *ArenaAllocator, io: std.Io, rand: std.Random, input: Input)
     try netns_client.upLink(1); // lo
     try netns_client.upLink(netns_veth.index);
 
-    try netns_client.addIpv4Addr(netns_veth.index, [_]u8{ 10, 0, 0, 2 });
+    const ipam = tinycni.ipam.Manager.init(allocator, "/var/lib/tinycni/ipam", input.config.gateway, input.config.subnet);
+    const allocated_ip = try ipam.alloc(io, input.container_id);
+
+    try netns_client.addIpv4Addr(netns_veth.index, allocated_ip.bytes);
 
     try netns_client.setDefaultGateway(netns_veth.index, input.config.gateway.bytes);
 
