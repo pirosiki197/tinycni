@@ -40,10 +40,33 @@ pub const Manager = struct {
             defer file.close(io);
 
             var buf: [64]u8 = undefined;
-            var writer = file.writer(io, &buf).interface;
-            try writer.writeAll(container_id);
+            var writer = file.writer(io, &buf);
+            try writer.interface.writeAll(container_id);
+            try writer.flush();
 
             return allocated_ip;
+        }
+    }
+
+    pub fn free(self: Self, io: std.Io, container_id: []const u8) !void {
+        const dir = try Dir.openDirAbsolute(io, self.config_path, .{ .iterate = true });
+        defer dir.close(io);
+
+        var iter = dir.iterate();
+        while (try iter.next(io)) |f| {
+            if (f.kind != .file) continue;
+            const file = try dir.openFile(io, f.name, .{});
+            defer file.close(io);
+
+            var buf: [64]u8 = undefined;
+            var reader = file.reader(io, &buf);
+
+            const content = try reader.interface.allocRemaining(self.allocator, .unlimited);
+            defer self.allocator.free(content);
+            if (std.mem.eql(u8, content, container_id)) {
+                try dir.deleteFile(io, f.name);
+                return;
+            }
         }
     }
 

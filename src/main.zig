@@ -9,6 +9,8 @@ const Client = tinycni.netlink.Client;
 const Ipv4Addr = tinycni.net.Ipv4Addr;
 const Ipv4Net = tinycni.net.Ipv4Net;
 
+const ipam_config_dir = "/var/lib/tinycni/ipam";
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var arena = init.arena;
@@ -25,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
 
     switch (input.cmd) {
         .add => try handleAdd(arena, io, rand, input),
-        .del => try handleDel(arena, rand, input),
+        .del => try handleDel(arena, io, rand, input),
     }
 }
 
@@ -73,7 +75,7 @@ fn handleAdd(arena: *ArenaAllocator, io: std.Io, rand: std.Random, input: Input)
     try netns_client.upLink(1); // lo
     try netns_client.upLink(netns_veth.index);
 
-    const ipam = tinycni.ipam.Manager.init(allocator, "/var/lib/tinycni/ipam", input.config.gateway, input.config.subnet);
+    const ipam = tinycni.ipam.Manager.init(allocator, ipam_config_dir, input.config.gateway, input.config.subnet);
     const allocated_ip = try ipam.alloc(io, input.container_id);
 
     try netns_client.addIpv4Addr(netns_veth.index, allocated_ip.bytes);
@@ -107,7 +109,7 @@ fn handleAdd(arena: *ArenaAllocator, io: std.Io, rand: std.Random, input: Input)
     try std.json.fmt(result, .{}).format(&stdout_writer.interface);
 }
 
-fn handleDel(arena: *ArenaAllocator, rand: std.Random, input: Input) !void {
+fn handleDel(arena: *ArenaAllocator, io: std.Io, rand: std.Random, input: Input) !void {
     const allocator = arena.allocator();
 
     const netns = try allocator.dupeSentinel(u8, input.netns, 0);
@@ -123,6 +125,9 @@ fn handleDel(arena: *ArenaAllocator, rand: std.Random, input: Input) !void {
 
     const interface = netns_client.getLinkByName(input.ifname) catch return;
     try netns_client.deleteInterface(interface.index);
+
+    const ipam = tinycni.ipam.Manager.init(allocator, ipam_config_dir, input.config.gateway, input.config.subnet);
+    try ipam.free(io, input.container_id);
 }
 
 fn configureNat(io: std.Io, subnet: []const u8, out: []const u8) !void {
