@@ -2,7 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const Alignment = std.mem.Alignment;
 
-pub const Client = @import("netlink/Client.zig");
+pub const Client = @import("Client.zig");
 
 const RTPROT = enum(u8) {
     UNSPEC = 0,
